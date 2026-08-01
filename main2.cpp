@@ -1,8 +1,8 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
-#include "Podcast.h"
-#include "Validation.h"
+#include "Podcast2.h"
+#include "Validation2.h"
 
 using namespace std;
 
