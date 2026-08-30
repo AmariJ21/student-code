@@ -43,6 +43,16 @@ class Politician(Base):
     first_seen: Mapped[dt.date | None] = mapped_column(nullable=True)
     last_seen: Mapped[dt.date | None] = mapped_column(nullable=True)
 
+    # Added for the leadership/committee motif found in research (party
+    # leaders/whips/chairs show a documented post-ascension return premium;
+    # committee jurisdiction is linked to informed sell-side trading). Each
+    # entry: {"role": str, "committee": str|None, "start": "YYYY-MM-DD",
+    # "end": "YYYY-MM-DD"|None}. Sourced from unitedstates/congress-legislators
+    # committee-membership + leadership data -- see ingestion/legislators.py.
+    # A JSON list rather than a join table: this project's scope doesn't
+    # need relational queries across it, just point-in-time lookups.
+    leadership_and_committee_history: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     disclosures: Mapped[list["Disclosure"]] = relationship(back_populates="politician")
 
     __table_args__ = (
@@ -102,6 +112,16 @@ class Transaction(Base):
     amount_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     amount_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     parse_confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="HIGH")
+
+    # Populated only when asset_type == OPTION; parsed from the filing's free-text
+    # description (House "D:" comment / Senate "Option Type: ... Strike price: ...
+    # Expires: ..." asset-name suffix) -- see ingestion/normalize.py. Quantity/
+    # contract count is deliberately NOT stored: the backtest sizes its own
+    # position independently of the discloser's position size (see engine.py),
+    # the same way it already does for plain stock trades.
+    option_type: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "CALL" / "PUT"
+    strike_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expiration_date: Mapped[dt.date | None] = mapped_column(nullable=True)
 
     disclosure: Mapped["Disclosure"] = relationship(back_populates="transactions")
     security: Mapped["Security | None"] = relationship()
@@ -174,6 +194,20 @@ class BacktestTrade(Base):
     price_resolution: Mapped[str] = mapped_column(String(8), nullable=False, default="1d")
     disclosure_confidence: Mapped[str] = mapped_column(String(32), nullable=False, default="DATE_ONLY_ASSUMED")
     ambiguous_same_bar: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    instrument_kind: Mapped[str] = mapped_column(String(8), nullable=False, default="STOCK")  # STOCK / OPTION
+    option_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    strike_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expiration_date: Mapped[dt.date | None] = mapped_column(nullable=True)
+    modeled_volatility: Mapped[float | None] = mapped_column(
+        Float, nullable=True, doc="Trailing realized vol used as the IV proxy at entry -- see backtest/options.py"
+    )
+    underlying_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    underlying_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exercised_and_held_underlying: Mapped[bool] = mapped_column(
+        Boolean, default=False, doc="True if a long-hold option position was exercised at/near expiration and continued as a stock holding"
+    )
+
     excluded_reason: Mapped[str | None] = mapped_column(
         String(64), nullable=True, doc="Set (never silently dropped) when a candidate trade could not be simulated"
     )

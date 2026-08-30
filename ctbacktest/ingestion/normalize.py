@@ -9,6 +9,7 @@ falls through to UNKNOWN/OTHER rather than guessing.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from typing import Optional
 
@@ -105,6 +106,93 @@ def map_asset_type(raw: str | None) -> AssetType:
         if needle in key:
             return _ASSET_TYPE_MAP[needle]
     return AssetType.OTHER
+
+
+# Senate eFD embeds option details directly in the asset-name cell, verified
+# live against a real Senator's PTR (e.g. "Ark Innovation ETF Option Type:
+# Call Strike price: $51.00 Expires: 12/20/2024"). Two-digit or four-digit
+# years both appear in practice.
+_SENATE_OPTION_RE = re.compile(
+    r"Option Type:\s*(?P<opt_type>Call|Put)\s*"
+    r"Strike price:\s*\$(?P<strike>[\d,]+\.?\d*)\s*"
+    r"Expires:\s*(?P<expiration>\d{1,2}/\d{1,2}/\d{2,4})",
+    re.IGNORECASE,
+)
+
+# House PTRs describe options in a free-text "D: ..." comment attached to the
+# transaction row, e.g. "Purchased 50 call options with a strike price of $80
+# and an expiration date of 1/16/26." or, for an exercise, "Exercised 500
+# call options purchased 11/22/23 (50,000 shares) at a strike price of $12
+# with an expiration date of 12/20/24." -- verified live against a real
+# Pelosi PTR. The connecting words ("with"/"at", "and"/"with") vary, so the
+# regex tolerates arbitrary text between the anchored phrases rather than
+# assuming one exact wording.
+_HOUSE_OPTION_RE = re.compile(
+    r"(?P<opt_type>call|put)\s+options?"
+    r".*?strike price of \$(?P<strike>[\d,]+\.?\d*)"
+    r".*?expiration date\s*(?:of)?\s*(?P<expiration>\d{1,2}/\d{1,2}/\d{2,4})",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_flexible_date(raw: str) -> Optional[dt.date]:
+    raw = raw.strip()
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return dt.datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_senate_option_description(asset_name: str | None) -> tuple[Optional[str], Optional[dict]]:
+    """Returns (base_asset_name_without_option_suffix, option_details_or_None).
+    option_details = {"option_type": "CALL"/"PUT", "strike_price": float, "expiration_date": date}."""
+    if not asset_name:
+        return asset_name, None
+    m = _SENATE_OPTION_RE.search(asset_name)
+    if not m:
+        return asset_name, None
+    expiration = _parse_flexible_date(m.group("expiration"))
+    if expiration is None:
+        return asset_name, None
+    base_name = asset_name[: m.start()].strip()
+    return base_name or asset_name, {
+        "option_type": m.group("opt_type").upper(),
+        "strike_price": float(m.group("strike").replace(",", "")),
+        "expiration_date": expiration,
+    }
+
+
+_EXERCISE_RE = re.compile(r"\bexercised\b", re.IGNORECASE)
+
+
+def is_exercise_description(text: str | None) -> bool:
+    """An 'Exercised N call/put options...' disclosure resolves to holding the
+    UNDERLYING stock, not a fresh option position -- the strike/expiration in
+    its description refer to options bought potentially years earlier, not a
+    new option we'd be simulating buying today (which would be economically
+    nonsensical: buying an option at/after its own expiration date). See
+    pipeline.py, which routes these to asset_type=COMMON_STOCK instead."""
+    return bool(text) and bool(_EXERCISE_RE.search(text))
+
+
+def parse_house_option_description(comment: str | None) -> Optional[dict]:
+    """Returns option_details or None. `comment` is the House PTR's "D: ..."
+    text associated with a [OP]-tagged transaction row."""
+    if not comment:
+        return None
+    m = _HOUSE_OPTION_RE.search(comment)
+    if not m:
+        return None
+    expiration = _parse_flexible_date(m.group("expiration"))
+    if expiration is None:
+        return None
+    return {
+        "option_type": m.group("opt_type").upper(),
+        "strike_price": float(m.group("strike").replace(",", "")),
+        "expiration_date": expiration,
+    }
 
 
 def clean_ticker(raw: str | None) -> Optional[str]:

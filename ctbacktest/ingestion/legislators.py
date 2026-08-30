@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -37,6 +38,7 @@ class LegislatorRecord:
     district: str | None
     first_seen: dt.date | None
     last_seen: dt.date | None
+    leadership_and_committee_history: list[dict] | None = None
 
 
 def _fetch_yaml(name: str, timeout: int = 30) -> list[dict]:
@@ -53,6 +55,56 @@ def _parse_date(s: str | None) -> dt.date | None:
         return dt.date.fromisoformat(s)
     except ValueError:
         return None
+
+
+def _leadership_history(entry: dict) -> list[dict]:
+    """Real, dated leadership roles (party leader/whip/steering chair/etc.)
+    -- research finding: members show a documented return premium *after*
+    ascending to one of these, so start/end dates matter and are used
+    causally by backtest/leaderboard.py, not just as a static label."""
+    history = []
+    for role in entry.get("leadership_roles", []) or []:
+        history.append(
+            {
+                "kind": "leadership",
+                "role": role.get("title"),
+                "committee": None,
+                "chamber": role.get("chamber"),
+                "start": role.get("start"),
+                "end": role.get("end"),
+            }
+        )
+    return history
+
+
+def fetch_committee_membership() -> dict[str, list[dict]]:
+    """Present-day-only committee assignments (see FEASIBILITY.md: no free
+    historical committee-roster archive exists in this dataset, so this is a
+    snapshot, not a point-in-time-correct history like leadership above).
+    Returns bioguide_id -> list of {committee, role}."""
+    membership = _fetch_yaml("committee-membership-current.yaml")
+    committees = _fetch_yaml("committees-current.yaml")
+    name_by_thomas_id = {c["thomas_id"]: c["name"] for c in committees if "thomas_id" in c}
+
+    by_bioguide: dict[str, list[dict]] = {}
+    for committee_id, members in membership.items():
+        parent_id = re.sub(r"\d+$", "", committee_id)  # subcommittee codes append digits to the 4-char parent code
+        committee_name = name_by_thomas_id.get(committee_id) or name_by_thomas_id.get(parent_id) or committee_id
+        for member in members:
+            bioguide = member.get("bioguide")
+            if not bioguide:
+                continue
+            by_bioguide.setdefault(bioguide, []).append(
+                {
+                    "kind": "committee_current_snapshot",
+                    "role": member.get("title", "Member"),
+                    "committee": committee_name,
+                    "chamber": None,
+                    "start": None,
+                    "end": None,
+                }
+            )
+    return by_bioguide
 
 
 def _records_from_entry(entry: dict) -> Iterator[LegislatorRecord]:
@@ -87,6 +139,8 @@ def _records_from_entry(entry: dict) -> Iterator[LegislatorRecord]:
     first_seen = min([d for d in all_starts if d], default=None)
     last_seen = max([d for d in all_ends if d], default=None)
 
+    leadership = _leadership_history(entry)
+
     for chamber, term in by_chamber.items():
         yield LegislatorRecord(
             bioguide_id=bioguide,
@@ -97,6 +151,7 @@ def _records_from_entry(entry: dict) -> Iterator[LegislatorRecord]:
             district=str(term.get("district")) if term.get("district") is not None else None,
             first_seen=first_seen,
             last_seen=last_seen,
+            leadership_and_committee_history=list(leadership) if leadership else None,
         )
 
 
@@ -107,6 +162,13 @@ def fetch_all_legislators() -> list[LegislatorRecord]:
         entries = _fetch_yaml(fname)
         for entry in entries:
             records.extend(_records_from_entry(entry))
+
+    logger.info("Fetching current committee membership")
+    committee_by_bioguide = fetch_committee_membership()
+    for rec in records:
+        committees = committee_by_bioguide.get(rec.bioguide_id)
+        if committees:
+            rec.leadership_and_committee_history = (rec.leadership_and_committee_history or []) + committees
     return records
 
 
@@ -133,6 +195,7 @@ def upsert_legislators(session, records: list[LegislatorRecord] | None = None) -
         existing.district = rec.district
         existing.first_seen = rec.first_seen
         existing.last_seen = rec.last_seen
+        existing.leadership_and_committee_history = rec.leadership_and_committee_history
         count += 1
     session.flush()
     return count

@@ -40,48 +40,38 @@ PDF_URL = f"{BASE}/public_disc/ptr-pdfs/{{year}}/{{doc_id}}.pdf"
 
 PTR_FILING_TYPE = "P"
 
-# A PTR line item, once whitespace-normalized, looks roughly like:
-#   "SP Albemarle Corporation (ALB) [ST] S 12/21/2023 01/08/2024 $1,001 - $15,000"
-# Owner prefix (SP/DC/JT) is optional (blank = filer/self). The "[ST]" asset-type
-# tag is dropped by _strip_asset_type_tags() before this regex runs, because
-# pdfplumber's text-flow extraction was observed (on a real, live-fetched PTR)
-# to sometimes relocate that tag to the middle of a wrapped dollar-amount range
-# (e.g. "$50,001 - [ST] $100,000"), which would otherwise break amount parsing.
-# The tag is captured separately by _extract_asset_type_codes() beforehand.
+# Real House PTR text (verified live against Pelosi's 2025 options filing,
+# not just the simpler Rep. Allen stock-sale example seen earlier) can
+# interleave columns so severely that a single sequential "asset, ticker,
+# tag, type, dates, amount" regex breaks: e.g. the raw flow for one real
+# transaction was literally "...Common P 01/14/2025 01/14/2025 $250,001 -
+# Stock (GOOGL) [OP] $500,000" -- the ticker landed AFTER the type/dates/
+# amount it should logically follow, because pdfplumber's text-flow
+# reconstruction followed the PDF's underlying multi-column layout, not
+# reading order. A fixed left-to-right grammar cannot handle that reliably.
 #
-# NOTE: this only matches line items that have a ticker in parentheses, i.e.
-# stocks/ETFs/options. Non-ticker assets (bonds, municipal securities, mutual
-# funds without a symbol) are intentionally not extracted here -- the baseline
-# strategy only acts on equity BUY signals, so those rows are out of scope
-# rather than a parsing gap. This is a heuristic, best-effort parser; see
-# FEASIBILITY.md #2/#8 for known limitations and why OCR-only filings are
-# excluded outright.
-_LINE_RE = re.compile(
-    r"(?P<owner>SP|DC|JT)?\s*"
-    r"(?P<asset>.+?)\s*"
-    r"\((?P<ticker>[A-Z]{1,6}(?:\.[A-Z])?)\)\s*"
-    r"(?P<txn_type>P|S(?:\s*\(partial\))?|E)\s+"
+# So instead of one sequential match per transaction, three independent
+# "anchors" are found across the whole page and paired by proximity:
+#   1. a ticker in parentheses,
+#   2. a (type, date, date, amount) block,
+#   3. a "D<garbled>: <description>." comment (which is where option
+#      strike/expiration/call-put actually live -- see normalize.py).
+# This tolerates the anchors appearing in either order around each other.
+_TICKER_ANCHOR_RE = re.compile(r"\(([A-Z]{1,6}(?:\.[A-Z])?)\)")
+_TYPE_DATE_AMOUNT_RE = re.compile(
+    r"(?P<txn_type>P|S\s*\(partial\)|S|E)\s+"
     r"(?P<txn_date>\d{2}/\d{2}/\d{4})\s+"
     r"\d{2}/\d{2}/\d{4}\s+"  # notification date -- not used; disclosure_date comes from the index's FilingDate instead
-    r"(?P<amount>\$[\d,]+\s*-\s*\$[\d,]+|\$[\d,]+)",
-    re.IGNORECASE,
+    r"(?P<amount>\$[\d,]+\s*-\s*\$[\d,]+|\$[\d,]+)"
 )
-
+_DESCRIPTION_RE = re.compile(r"D\W{0,4}:\s*(?P<desc>.+?\.)")
+_OWNER_CODE_RE = re.compile(r"\b(SP|DC|JT)\b")
 _ASSET_TYPE_TAG_RE = re.compile(r"\[([A-Z]{1,3})\]")
-_TICKER_WITH_TAG_RE = re.compile(r"\(([A-Z]{1,6}(?:\.[A-Z])?)\)\s*\[([A-Z]{1,3})\]")
 
 _ASSET_TYPE_CODE_MAP = {"ST": "Stock", "OP": "Option", "PS": "Non-Public Stock"}
 _TXN_TYPE_CODE_MAP = {"P": "Purchase", "S": "Sale (Full)", "E": "Exchange"}
 
-
-def _extract_asset_type_codes(text: str) -> dict[str, str]:
-    """Best-effort ticker -> asset-type-code map from the un-stripped text,
-    for the common case where the [XX] tag immediately follows "(TICKER)"."""
-    return {ticker.upper(): code.upper() for ticker, code in _TICKER_WITH_TAG_RE.findall(text)}
-
-
-def _strip_asset_type_tags(text: str) -> str:
-    return _ASSET_TYPE_TAG_RE.sub(" ", text)
+_MAX_ANCHOR_DISTANCE_CHARS = 250  # sanity bound so a ticker from a totally different transaction never gets paired
 
 
 @dataclass
@@ -139,27 +129,86 @@ class HouseClerkClient:
         return "\n".join(text_parts)
 
     def _parse_transactions(self, text: str) -> list[dict]:
-        normalized = " ".join(text.split())
-        ticker_to_asset_code = _extract_asset_type_codes(normalized)
-        strippable = _strip_asset_type_tags(normalized)
+        # PDF glyph-width placeholder NUL bytes (observed live -- e.g. a "D:"
+        # label extracted as "D\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00:")
+        # would otherwise defeat the description regex's bounded gap; just
+        # strip them outright rather than trying to bound an unpredictable count.
+        cleaned = text.replace("\x00", "")
+        normalized = " ".join(cleaned.split())
+
+        # Tags are intentionally NOT stripped globally here (contrast with
+        # older behavior): each transaction's [XX] asset-type tag is instead
+        # paired to its own specific ticker occurrence below, because the
+        # same ticker can legitimately appear multiple times in one filing
+        # with DIFFERENT asset types (confirmed live: Pelosi's NVDA appeared
+        # as both [ST] stock sales and a separate [OP] option purchase in the
+        # same PTR) -- a single global ticker->type dict would silently
+        # misattribute one of them.
+        ticker_matches = list(_TICKER_ANCHOR_RE.finditer(normalized))
+        tag_matches = list(_ASSET_TYPE_TAG_RE.finditer(normalized))
+        type_matches = sorted(_TYPE_DATE_AMOUNT_RE.finditer(normalized), key=lambda m: m.start())
+        desc_matches = list(_DESCRIPTION_RE.finditer(normalized))
+
+        used_ticker_idx: set[int] = set()
+        used_tag_idx: set[int] = set()
+        used_desc_idx: set[int] = set()
         transactions = []
-        for m in _LINE_RE.finditer(strippable):
-            owner_code = (m.group("owner") or "").upper()
-            ticker = m.group("ticker").upper()
-            asset_code = ticker_to_asset_code.get(ticker)
-            txn_type_raw = m.group("txn_type")
+
+        def _nearest_unused(matches, used: set[int], anchor_pos: int, max_dist: int):
+            best_idx, best_dist = None, None
+            for idx, m in enumerate(matches):
+                if idx in used:
+                    continue
+                dist = min(abs(m.start() - anchor_pos), abs(m.end() - anchor_pos))
+                if dist <= max_dist and (best_dist is None or dist < best_dist):
+                    best_dist, best_idx = dist, idx
+            return best_idx
+
+        for i, tm in enumerate(type_matches):
+            segment_end = type_matches[i + 1].start() if i + 1 < len(type_matches) else len(normalized)
+
+            ticker_idx = _nearest_unused(ticker_matches, used_ticker_idx, tm.start(), _MAX_ANCHOR_DISTANCE_CHARS)
+            if ticker_idx is None:
+                continue  # no ticker found nearby -- likely a non-equity asset (bond/fund); out of scope, see module docstring
+            used_ticker_idx.add(ticker_idx)
+            ticker_match = ticker_matches[ticker_idx]
+            ticker = ticker_match.group(1).upper()
+
+            tag_idx = _nearest_unused(tag_matches, used_tag_idx, ticker_match.start(), 80)
+            asset_code = tag_matches[tag_idx].group(1).upper() if tag_idx is not None else None
+            if tag_idx is not None:
+                used_tag_idx.add(tag_idx)
+
+            desc_text = None
+            for k, dm in enumerate(desc_matches):
+                if k in used_desc_idx:
+                    continue
+                if tm.end() <= dm.start() < segment_end:
+                    desc_text = dm.group("desc")
+                    used_desc_idx.add(k)
+                    break
+
+            segment_start_for_name = type_matches[i - 1].end() if i > 0 else 0
+            name_window_end = min(ticker_match.start(), tm.start())
+            asset_name_raw = normalized[max(segment_start_for_name, name_window_end - 120) : name_window_end]
+            owner_match = _OWNER_CODE_RE.search(asset_name_raw[-40:])
+            asset_name = _OWNER_CODE_RE.sub("", asset_name_raw).strip(" .")
+
+            txn_type_raw = tm.group("txn_type")
             txn_code = txn_type_raw.upper().split()[0]
             is_partial = "partial" in txn_type_raw.lower()
             transaction_type = "Sale (Partial)" if (txn_code == "S" and is_partial) else _TXN_TYPE_CODE_MAP.get(txn_code, "Unknown")
+
             transactions.append(
                 {
-                    "owner_code": owner_code or None,
-                    "asset_name": m.group("asset").strip(),
+                    "owner_code": owner_match.group(1).upper() if owner_match else None,
+                    "asset_name": asset_name or None,
                     "ticker": ticker,
                     "asset_type": _ASSET_TYPE_CODE_MAP.get(asset_code, "Other") if asset_code else "Other",
                     "transaction_type": transaction_type,
-                    "transaction_date": m.group("txn_date"),
-                    "amount": m.group("amount"),
+                    "transaction_date": tm.group("txn_date"),
+                    "amount": tm.group("amount"),
+                    "description": desc_text,
                 }
             )
         return transactions

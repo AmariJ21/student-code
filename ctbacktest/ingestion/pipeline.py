@@ -73,7 +73,12 @@ def ingest_senate_range(session, start_date: dt.date, end_date: dt.date, client:
 
         for raw_txn in filing.transactions:
             ticker = normalize.clean_ticker(raw_txn.get("ticker"))
+            base_asset_name, option_details = normalize.parse_senate_option_description(raw_txn.get("asset_name"))
             asset_type = normalize.map_asset_type(raw_txn.get("asset_type"))
+            if option_details and not normalize.is_exercise_description(raw_txn.get("asset_name")):
+                asset_type = AssetType.OPTION  # trust a successfully-parsed option description over the raw asset-type label
+            elif option_details:
+                option_details = None  # exercise event -> resolves to a stock position, not a fresh option (see normalize.is_exercise_description)
             txn_type = normalize.map_transaction_type(raw_txn.get("transaction_type"))
             owner = normalize.map_owner(raw_txn.get("owner"))
             amount_min, amount_max = normalize.parse_amount_range(raw_txn.get("amount"))
@@ -85,7 +90,13 @@ def ingest_senate_range(session, start_date: dt.date, end_date: dt.date, client:
 
             security = None
             if ticker:
-                security = _get_or_create_security(session, ticker, raw_txn.get("asset_name"), asset_type)
+                # Security.asset_type always describes the UNDERLYING instrument
+                # (the ticker here is always the underlying's symbol, never an
+                # options-specific symbol -- verified live for both chambers):
+                # an option transaction's own type/strike/expiration lives on
+                # the Transaction row instead (see model docstring).
+                underlying_type = AssetType.COMMON_STOCK if asset_type == AssetType.OPTION else asset_type
+                security = _get_or_create_security(session, ticker, base_asset_name, underlying_type)
             else:
                 stats["transactions_no_ticker"] += 1
 
@@ -101,6 +112,9 @@ def ingest_senate_range(session, start_date: dt.date, end_date: dt.date, client:
                     amount_min=amount_min,
                     amount_max=amount_max,
                     parse_confidence="HIGH",
+                    option_type=option_details["option_type"] if option_details else None,
+                    strike_price=option_details["strike_price"] if option_details else None,
+                    expiration_date=option_details["expiration_date"] if option_details else None,
                 )
             )
             stats["transactions_new"] += 1
@@ -143,7 +157,12 @@ def ingest_house_year(session, year: int, client: house_clerk.HouseClerkClient |
 
         for raw_txn in filing.transactions:
             ticker = normalize.clean_ticker(raw_txn.get("ticker"))
+            option_details = normalize.parse_house_option_description(raw_txn.get("description"))
             asset_type = normalize.map_asset_type(raw_txn.get("asset_type"))
+            if option_details and not normalize.is_exercise_description(raw_txn.get("description")):
+                asset_type = AssetType.OPTION  # trust a successfully-parsed option description over the fragile [XX] tag match
+            elif option_details:
+                option_details = None  # exercise event -> resolves to a stock position, not a fresh option (see normalize.is_exercise_description)
             txn_type = normalize.map_transaction_type(raw_txn.get("transaction_type"))
             owner = normalize.map_owner(raw_txn.get("owner_code"))
             amount_min, amount_max = normalize.parse_amount_range(raw_txn.get("amount"))
@@ -152,7 +171,8 @@ def ingest_house_year(session, year: int, client: house_clerk.HouseClerkClient |
             except (KeyError, ValueError):
                 continue
 
-            security = _get_or_create_security(session, ticker, raw_txn.get("asset_name"), asset_type) if ticker else None
+            underlying_type = AssetType.COMMON_STOCK if asset_type == AssetType.OPTION else asset_type
+            security = _get_or_create_security(session, ticker, raw_txn.get("asset_name"), underlying_type) if ticker else None
             session.add(
                 Transaction(
                     disclosure_id=disclosure.disclosure_id,
@@ -165,6 +185,9 @@ def ingest_house_year(session, year: int, client: house_clerk.HouseClerkClient |
                     amount_min=amount_min,
                     amount_max=amount_max,
                     parse_confidence="PARSED_HEURISTIC",
+                    option_type=option_details["option_type"] if option_details else None,
+                    strike_price=option_details["strike_price"] if option_details else None,
+                    expiration_date=option_details["expiration_date"] if option_details else None,
                 )
             )
             stats["transactions_new"] += 1
