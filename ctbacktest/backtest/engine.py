@@ -18,6 +18,8 @@ by convention:
 from __future__ import annotations
 
 import datetime as dt
+import heapq
+import itertools
 from dataclasses import dataclass
 from typing import Optional
 
@@ -132,19 +134,132 @@ class BacktestEngine:
             return i, bar.open  # first bar strictly after the entry day (data gap on the entry day itself)
         return None, None
 
-    def run(self, candidates: list[TradeCandidate]) -> list[SimulatedTrade]:
+    def _price_path(self, candidate: TradeCandidate, entry_ts: dt.datetime, trade: SimulatedTrade) -> Optional[dict]:
+        """Phase 1: determine the full price outcome for one candidate as if
+        it were the only position in the portfolio -- entry/exit prices,
+        timing, MFE/MAE, exit reason. This is entirely independent of
+        position sizing (per-share prices and return *ratios* don't depend on
+        how many dollars/shares are involved), which is what makes phase 2
+        (portfolio capacity, chronologically overlapping positions) possible
+        without re-deriving the price path. Mutates `trade` in place for the
+        fields phase 1 can already determine; returns a dict of the
+        additional raw values phase 2 needs, or None if excluded (in which
+        case trade.excluded_reason is already set)."""
         strategy = self.config.strategy
+        execution = self.config.execution
+
+        series, resolution = self._fetch_series(candidate.ticker, entry_ts)
+        if not series.bars:
+            trade.excluded_reason = "EXCLUDED_NO_PRICE_DATA"
+            return None
+        if not names_plausibly_match(candidate.expected_asset_name, series.security_name):
+            # Ticker-symbol reuse guard -- see corporate_actions.names_plausibly_match.
+            trade.excluded_reason = "EXCLUDED_TICKER_IDENTITY_MISMATCH"
+            return None
+
+        start_idx, raw_entry_price = self._resolve_entry(series.bars, entry_ts)
+        if start_idx is None or raw_entry_price is None:
+            trade.excluded_reason = "EXCLUDED_NO_PRICE_DATA_AFTER_ENTRY"
+            return None
+
+        entry_fill = exec_model.entry_fill_price(raw_entry_price, execution)
+        target_price = entry_fill * (1 + strategy.take_profit)
+        stop_price = entry_fill * (1 - strategy.stop_loss) if strategy.stop_loss else None
+        hold_deadline = add_trading_days(entry_ts, strategy.max_hold_days)
+
+        best_high = raw_entry_price
+        worst_low = raw_entry_price
+        exit_trigger = ExitTrigger.NONE
+        exit_raw_price = None
+        exit_ts = None
+        last_bar_within_deadline = None
+        ran_out_of_data = True
+
+        for bar in series.bars[start_idx:]:
+            if bar.ts > hold_deadline:
+                ran_out_of_data = False
+                break
+            best_high = max(best_high, bar.high)
+            worst_low = min(worst_low, bar.low)
+            outcome = evaluate_bar(bar.low, bar.high, target_price, stop_price, strategy.same_bar_mode)
+            if outcome.trigger != ExitTrigger.NONE:
+                exit_trigger = outcome.trigger
+                exit_raw_price = outcome.fill_price if outcome.fill_price is not None else bar.close
+                exit_ts = bar.ts
+                ran_out_of_data = False
+                break
+            last_bar_within_deadline = bar
+        else:
+            ran_out_of_data = True
+
+        if exit_trigger == ExitTrigger.AMBIGUOUS:
+            trade.ambiguous_same_bar = True
+            trade.exit_reason = "AMBIGUOUS_SAME_BAR"
+        elif exit_trigger != ExitTrigger.NONE:
+            trade.exit_reason = exit_trigger.value
+        elif last_bar_within_deadline is not None:
+            exit_raw_price = last_bar_within_deadline.close
+            exit_ts = last_bar_within_deadline.ts
+            trade.exit_reason = "DATA_ENDED" if ran_out_of_data else "TIME_EXIT"
+        else:
+            trade.exit_reason = "DATA_ENDED"
+            exit_raw_price = raw_entry_price
+            exit_ts = entry_ts
+
+        exit_fill = exec_model.exit_fill_price(exit_raw_price, execution)
+
+        trade.entry_timestamp = entry_ts
+        trade.entry_price = entry_fill
+        trade.exit_timestamp = exit_ts
+        trade.exit_price = exit_fill
+        trade.target_price = target_price
+        trade.stop_price = stop_price
+        trade.price_resolution = resolution.value
+        trade.gross_return = (exit_raw_price - raw_entry_price) / raw_entry_price
+        trade.slippage_cost = (entry_fill - raw_entry_price) + (exit_raw_price - exit_fill)
+        trade.holding_period_days = (exit_ts - entry_ts).total_seconds() / 86400.0
+        trade.mfe = (best_high - raw_entry_price) / raw_entry_price
+        trade.mae = (worst_low - raw_entry_price) / raw_entry_price
+
+        return {"entry_fill": entry_fill, "exit_fill": exit_fill}
+
+    def run(self, candidates: list[TradeCandidate]) -> list[SimulatedTrade]:
+        """Phase 2: walk candidates in entry-timestamp order, settling
+        (closing) any still-open positions whose exit already occurred
+        before considering the next entry -- this is what actually makes
+        max_positions/max_portfolio_exposure bind on genuinely overlapping
+        holding periods, rather than every trade appearing sequentially
+        resolved before the next one is even considered."""
         execution = self.config.execution
 
         enriched = []
         for c in candidates:
             base_ts = compute_market_entry_timestamp(c)
-            entry_ts = _apply_entry_delay(base_ts, strategy.entry_delay_minutes)
+            entry_ts = _apply_entry_delay(base_ts, self.config.strategy.entry_delay_minutes)
             enriched.append((entry_ts, c))
         enriched.sort(key=lambda pair: pair[0])
 
         results: list[SimulatedTrade] = []
+        # Min-heap of (exit_ts, tie_breaker, portfolio_key, trade, shares, position_dollars, exit_fill).
+        # tie_breaker is a unique counter so heapq never needs to compare the
+        # (unhashable, uncomparable) SimulatedTrade objects themselves.
+        pending_closes: list[tuple[dt.datetime, int, object, "SimulatedTrade", float, float, float]] = []
+        tie_breaker = itertools.count()
+
+        def _settle_up_to(cutoff_ts: dt.datetime) -> None:
+            while pending_closes and pending_closes[0][0] <= cutoff_ts:
+                exit_ts, _, portfolio_key, trade_obj, shares, position_dollars, exit_fill = heapq.heappop(pending_closes)
+                proceeds = shares * exit_fill
+                commission = exec_model.commission_cost(position_dollars, execution) + exec_model.commission_cost(proceeds, execution)
+                proceeds -= commission
+                self.portfolio.close_position(portfolio_key, proceeds)
+                self.portfolio.record_snapshot(exit_ts, self.portfolio.deployed_value())
+                trade_obj.fees = commission
+                trade_obj.net_return = (proceeds - position_dollars) / position_dollars
+
         for entry_ts, candidate in enriched:
+            _settle_up_to(entry_ts)
+
             delay_days = (candidate.disclosure_date - candidate.transaction_date).days
             trade = SimulatedTrade(
                 transaction_id=candidate.transaction_id,
@@ -155,119 +270,37 @@ class BacktestEngine:
                 disclosure_confidence=candidate.disclosure_confidence,
             )
 
-            current_equity = self.portfolio.equity()
+            priced = self._price_path(candidate, entry_ts, trade)
+            if priced is None:
+                results.append(trade)
+                continue
+
+            current_equity = self.portfolio.equity(self.portfolio.deployed_value())
             if not self.portfolio.can_open_position(current_equity):
                 trade.excluded_reason = "EXCLUDED_PORTFOLIO_CAPACITY"
                 results.append(trade)
                 continue
 
-            series, resolution = self._fetch_series(candidate.ticker, entry_ts)
-            if not series.bars:
-                trade.excluded_reason = "EXCLUDED_NO_PRICE_DATA"
-                results.append(trade)
-                continue
-            if not names_plausibly_match(candidate.expected_asset_name, series.security_name):
-                # Ticker-symbol reuse guard -- see corporate_actions.names_plausibly_match.
-                # A delisted name's old ticker can be reassigned to an unrelated
-                # company; trusting the price series here would silently trade
-                # on the wrong company's history rather than fail loudly.
-                trade.excluded_reason = "EXCLUDED_TICKER_IDENTITY_MISMATCH"
-                results.append(trade)
-                continue
-
-            start_idx, raw_entry_price = self._resolve_entry(series.bars, entry_ts)
-            if start_idx is None or raw_entry_price is None:
-                trade.excluded_reason = "EXCLUDED_NO_PRICE_DATA_AFTER_ENTRY"
-                results.append(trade)
-                continue
-
-            entry_fill = exec_model.entry_fill_price(raw_entry_price, execution)
             position_dollars = self.portfolio.size_position(current_equity)
             if position_dollars <= 0:
                 trade.excluded_reason = "EXCLUDED_INSUFFICIENT_CAPITAL"
                 results.append(trade)
                 continue
 
-            shares = position_dollars / entry_fill
-            target_price = entry_fill * (1 + strategy.take_profit)
-            stop_price = entry_fill * (1 - strategy.stop_loss) if strategy.stop_loss else None
-            hold_deadline = add_trading_days(entry_ts, strategy.max_hold_days)
-
-            trade_key = object()
-            self.portfolio.open_position(trade_key, candidate.ticker, shares, position_dollars, entry_ts)
-
-            trade.entry_timestamp = entry_ts
-            trade.entry_price = entry_fill
+            shares = position_dollars / priced["entry_fill"]
             trade.shares = shares
             trade.position_value = position_dollars
-            trade.target_price = target_price
-            trade.stop_price = stop_price
-            trade.price_resolution = resolution.value
 
-            best_high = raw_entry_price
-            worst_low = raw_entry_price
-            exit_trigger = ExitTrigger.NONE
-            exit_raw_price = None
-            exit_ts = None
-            last_bar_within_deadline = None
-            ran_out_of_data = True
+            portfolio_key = object()
+            self.portfolio.open_position(portfolio_key, candidate.ticker, shares, position_dollars, entry_ts)
+            self.portfolio.record_snapshot(entry_ts, self.portfolio.deployed_value())
 
-            for bar in series.bars[start_idx:]:
-                if bar.ts > hold_deadline:
-                    ran_out_of_data = False  # we have data; we simply reached the hold deadline first
-                    break
-                best_high = max(best_high, bar.high)
-                worst_low = min(worst_low, bar.low)
-                outcome = evaluate_bar(bar.low, bar.high, target_price, stop_price, strategy.same_bar_mode)
-                if outcome.trigger != ExitTrigger.NONE:
-                    exit_trigger = outcome.trigger
-                    exit_raw_price = outcome.fill_price if outcome.fill_price is not None else bar.close
-                    exit_ts = bar.ts
-                    ran_out_of_data = False
-                    break
-                last_bar_within_deadline = bar
-            else:
-                ran_out_of_data = True  # loop exhausted series.bars without ever breaking
-
-            if exit_trigger == ExitTrigger.AMBIGUOUS:
-                trade.ambiguous_same_bar = True
-                trade.exit_reason = "AMBIGUOUS_SAME_BAR"
-            elif exit_trigger != ExitTrigger.NONE:
-                trade.exit_reason = exit_trigger.value
-            elif last_bar_within_deadline is not None:
-                # No TP/SL trigger before the deadline (or before data ran out):
-                # exit at the last bar we actually saw -- never the bar that
-                # tripped the deadline check itself, which would be look-ahead.
-                exit_raw_price = last_bar_within_deadline.close
-                exit_ts = last_bar_within_deadline.ts
-                trade.exit_reason = "DATA_ENDED" if ran_out_of_data else "TIME_EXIT"
-            else:
-                # Not even one bar existed at/after entry within the hold window.
-                trade.exit_reason = "DATA_ENDED"
-                exit_raw_price = raw_entry_price
-                exit_ts = entry_ts
-
-            exit_fill = exec_model.exit_fill_price(exit_raw_price, execution)
-            proceeds = shares * exit_fill
-            commission = exec_model.commission_cost(position_dollars, execution) + exec_model.commission_cost(proceeds, execution)
-            proceeds -= commission
-
-            self.portfolio.close_position(trade_key, proceeds)
-            self.portfolio.record_snapshot(exit_ts, self.portfolio.deployed_value())
-
-            trade.exit_timestamp = exit_ts
-            trade.exit_price = exit_fill
-            trade.gross_return = (exit_raw_price - raw_entry_price) / raw_entry_price
-            # Both terms are positive: the extra we paid to get in, plus the
-            # shortfall we took to get out -- total friction cost, in
-            # price-per-share terms (not a fraction, not a sign-flipped diff).
-            trade.slippage_cost = (entry_fill - raw_entry_price) + (exit_raw_price - exit_fill)
-            trade.fees = commission
-            trade.net_return = (proceeds - position_dollars) / position_dollars
-            trade.holding_period_days = (exit_ts - entry_ts).total_seconds() / 86400.0
-            trade.mfe = (best_high - raw_entry_price) / raw_entry_price
-            trade.mae = (worst_low - raw_entry_price) / raw_entry_price
+            heapq.heappush(
+                pending_closes,
+                (trade.exit_timestamp, next(tie_breaker), portfolio_key, trade, shares, position_dollars, priced["exit_fill"]),
+            )
 
             results.append(trade)
 
+        _settle_up_to(dt.datetime.max.replace(tzinfo=dt.timezone.utc))
         return results

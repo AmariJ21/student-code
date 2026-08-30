@@ -97,9 +97,13 @@ def map_asset_type(raw: str | None) -> AssetType:
     if not raw:
         return AssetType.OTHER
     key = raw.strip().lower()
-    for needle, mapped in _ASSET_TYPE_MAP.items():
+    # Longest needle first: "stock option" must win over the shorter "stock"
+    # substring it contains, or every option would be misclassified as a
+    # plain equity purchase (see spec section 8: "do not blindly treat
+    # options as ordinary stock purchases").
+    for needle in sorted(_ASSET_TYPE_MAP, key=len, reverse=True):
         if needle in key:
-            return mapped
+            return _ASSET_TYPE_MAP[needle]
     return AssetType.OTHER
 
 
