@@ -167,6 +167,27 @@ history; it is off by default (no fabricated key, no assumed subscription).
   reasonable static approximation for most companies; market-cap bucketing of a
   trade from 2019 using 2026 shares-outstanding/price is an approximation and
   is labeled as such in every breakdown that uses it.
+- **Politician name matching across sources is best-effort, not exact.**
+  Senate eFD gives filer names as entered on the form (e.g. "Thomas H
+  Tuberville", "William F Hagerty, IV"), which frequently don't
+  string-match the common/short names in the unitedstates/congress-legislators
+  roster ("Tommy Tuberville", "Bill Hagerty") -- confirmed during live
+  testing. Unmatched filers get a minimal `Politician` record created on the
+  fly (bioguide_id left null) rather than being silently merged into the
+  wrong person or dropped; this means the same real senator can end up as
+  two separate `Politician` rows (one roster-matched, one ad hoc) until the
+  matching logic is improved with a proper name-normalization/alias step.
+- **Ticker-symbol reuse can silently return the wrong company's price
+  history.** Confirmed live during development: Yahoo's history for "PARA"
+  returned prices in the tens of thousands of dollars per share for January
+  2024, because Paramount Global's old ticker was reassigned to an unrelated
+  micro-cap after Paramount delisted, and Yahoo's own `longName` for that
+  data was the new company, not Paramount. The backtester cross-checks the
+  provider's company name against the disclosure's asset name and excludes
+  the trade (`EXCLUDED_TICKER_IDENTITY_MISMATCH`) rather than trading on a
+  silently wrong price series, but this is a coarse heuristic, not a
+  guarantee -- a reused ticker with a similarly-named successor company
+  would not be caught.
 - **OCR not implemented.** House PTRs that are scanned images (pre-2020-ish,
   and any paper-filed candidate reports) have no extractable text layer. The
   ingestion pipeline detects this (near-empty `pdfplumber` extraction) and
