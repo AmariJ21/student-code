@@ -77,6 +77,22 @@ class PositionSizingMode(str, Enum):
     EQUAL_WEIGHT = "equal_weight"
 
 
+class HoldingMode(str, Enum):
+    SHORT_TERM_TARGET = "short_term_target"  # original baseline: fixed TP/SL/max_hold_days
+    LONG_HOLD = "long_hold"  # the researched motif: trailing stop, hold through a cycle, exercise-and-hold at option expiration
+
+
+class InstrumentScope(str, Enum):
+    STOCK_ETF_ONLY = "stock_etf_only"  # original baseline scope
+    INCLUDE_OPTIONS = "include_options"  # simulate OPTION-typed transactions too, via backtest/options.py
+
+
+class PoliticianSelectionMode(str, Enum):
+    ALL = "all"  # original baseline: every disclosed BUY is a candidate
+    ROLLING_LEADERBOARD = "rolling_leaderboard"  # causal, point-in-time top-K by trailing realized performance
+    NAMED_CASE_STUDY = "named_case_study"  # restricted to specific named politicians -- hindsight selection, never a general-edge claim (see cli/main.py)
+
+
 class StrategyConfig(BaseModel):
     take_profit: float = Field(default=0.10)
     stop_loss: Optional[float] = Field(default=None)
@@ -84,6 +100,28 @@ class StrategyConfig(BaseModel):
     entry_delay_minutes: object = Field(default=0, description="int minutes, or the string 'next_open'")
     same_bar_mode: SameBarMode = Field(default=SameBarMode.CONSERVATIVE)
     include_only_buys: bool = Field(default=True, description="Baseline strategy ignores SELL transactions")
+
+    holding_mode: HoldingMode = Field(default=HoldingMode.SHORT_TERM_TARGET)
+    long_hold_trailing_stop_pct: Optional[float] = Field(
+        default=0.30, description="LONG_HOLD mode only: exit if value drops this fraction from its post-entry peak"
+    )
+    long_hold_exercise_and_hold_underlying: bool = Field(
+        default=True,
+        description="LONG_HOLD mode only: at an ITM option's expiration, realize its value and continue holding an "
+        "equivalent-dollar stock position rather than closing outright -- see backtest/options.py for why this is "
+        "modeled as a value-equivalent rollover rather than literally modeling the exercise cash outlay.",
+    )
+
+    instrument_scope: InstrumentScope = Field(default=InstrumentScope.STOCK_ETF_ONLY)
+    option_risk_free_rate: float = Field(default=0.045)
+    option_dividend_yield_default: float = Field(default=0.0, description="Used when a live dividend-yield lookup is unavailable")
+    option_iv_lookback_days: int = Field(default=90, description="Trailing realized-vol window used as the IV proxy -- see backtest/options.py")
+
+    politician_selection_mode: PoliticianSelectionMode = Field(default=PoliticianSelectionMode.ALL)
+    leaderboard_lookback_days: int = Field(default=365)
+    leaderboard_top_k: int = Field(default=10)
+    leaderboard_min_track_record_trades: int = Field(default=3)
+    named_case_study_politician_ids: list[int] = Field(default_factory=list)
 
     @field_validator("take_profit")
     @classmethod
