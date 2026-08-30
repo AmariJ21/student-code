@@ -115,9 +115,9 @@ for reporting the disclosure delay, never for pricing.
 
 | Resolution | Provider (free) | Real historical coverage |
 |---|---|---|
-| Daily (adjusted for splits/dividends) | `yfinance` (Yahoo Finance) | Full listed history for surviving tickers; effectively unlimited for this project's date ranges |
-| 5m/15m/30m/60m | `yfinance` | **Only the trailing ~60 days from today** — Yahoo does not serve older intraday bars |
-| 1m | `yfinance` | **Only the trailing ~7 days from today** |
+| Daily (adjusted for splits/dividends) | Yahoo Finance, via a direct HTTP client against its public chart JSON endpoint (see implementation note below) | Full listed history for surviving tickers; effectively unlimited for this project's date ranges |
+| 5m/15m/30m/60m | Yahoo's chart API | **Only the trailing ~60 days from today** — Yahoo does not serve older intraday bars |
+| 1m | Yahoo's chart API | **Only the trailing ~7 days from today** |
 | 1m–1s, multi-year history | Polygon.io (paid) | 2 years free tier, 5/10/20 years on paid plans ($29–$199+/mo) |
 | Tick data | Not pursued | No free source exists; paid tick data (e.g. exchange direct feeds) is out of scope/cost-prohibitive for this project |
 
@@ -128,6 +128,16 @@ window. Minute/5-minute data is only obtainable for whatever falls inside the
 trailing 60/7-day window from whenever the system is actually run, which is
 useful for *validating recent trades* and for a live-forward paper-trading
 extension, but not for a historical backtest spanning years.
+
+**Implementation note**: the market-data client hits Yahoo's public chart JSON
+endpoint (`query1.finance.yahoo.com/v8/finance/chart/...`) directly via
+`requests` rather than depending on the `yfinance` package, whose bundled
+browser-impersonation HTTP client (`curl_cffi`) was found during development
+to fail outright in this project's own build/verification environment
+(TLS/SSL errors) even though the same endpoint is reachable fine with a plain
+HTTP client and a normal User-Agent header. This is the same underlying data
+source and the same resolution/history limits described above; it's a more
+minimal and more portable dependency, not a different data source.
 
 **Design decision**: the data-resolution hierarchy from the spec (tick → 1m →
 5m → daily) is implemented as a real fallback chain in `MarketDataProvider`,
@@ -164,7 +174,7 @@ history; it is off by default (no fabricated key, no assumed subscription).
   with the transactions left blank rather than fabricated — it does not
   attempt OCR. A user who needs these specific filings would need to add an
   OCR step themselves.
-- **Rate limits / cost**: `yfinance` is free but unofficial and rate-limited by
+- **Rate limits / cost**: Yahoo's chart API is free but unofficial and rate-limited by
   Yahoo in practice (bursts get throttled); the provider layer includes local
   caching (Parquet-backed) and backoff to stay usable for a multi-year, many-ticker
   backtest without re-fetching on every run.

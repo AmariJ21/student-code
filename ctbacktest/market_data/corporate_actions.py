@@ -1,13 +1,17 @@
 """
 Corporate action handling.
 
-DECISION (documented, not hidden -- see FEASIBILITY.md #10 / spec section 10):
-the backtester trades on `adj_close`-derived returns wherever adj_close is
-available, and reconstructs OHLC-consistent trigger prices by applying the
-same split/dividend adjustment ratio to open/high/low/close for a given bar.
-This means a stock's split history is already reflected in the price series
-we backtest on, so a 10-for-1 split shows up as continuous price action, not
-a fabricated 90% drawdown.
+VERIFIED (not assumed) while building this module: Yahoo's chart endpoint
+already returns split-adjusted open/high/low/close by default -- checked
+against AAPL's real 4-for-1 split on 2020-08-31, where raw open/close show no
+discontinuity across the split date. `adj_close` layers dividend adjustment
+on top of that (slightly below raw close, growing with accumulated
+dividends). Consequently:
+  - Entry prices and TP/SL triggers use raw OHLC directly (bar.open/high/
+    low/close) -- they are already split-consistent, so a 10-for-1 split
+    does not appear as a fabricated 90% drawdown.
+  - Total-return calculations for benchmarks that are meant to include
+    dividend reinvestment (e.g. "buy and hold SPY") use `adj_close`.
 
 What this module does NOT do:
   - Ticker-symbol changes and mergers are NOT auto-resolved. A `Security` can
