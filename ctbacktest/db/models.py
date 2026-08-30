@@ -34,7 +34,7 @@ class Politician(Base):
     __tablename__ = "politicians"
 
     politician_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    bioguide_id: Mapped[str | None] = mapped_column(String(16), unique=True, nullable=True, index=True)
+    bioguide_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     chamber: Mapped[str] = mapped_column(String(16), nullable=False)  # HOUSE / SENATE
     party: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -44,6 +44,10 @@ class Politician(Base):
     last_seen: Mapped[dt.date | None] = mapped_column(nullable=True)
 
     disclosures: Mapped[list["Disclosure"]] = relationship(back_populates="politician")
+
+    __table_args__ = (
+        UniqueConstraint("bioguide_id", "chamber", name="uq_politicians_bioguide_chamber"),
+    )
 
 
 class Security(Base):

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +29,27 @@ class CachingProvider(MarketDataProvider):
     def _cache_path(self, ticker: str, interval: str) -> Path:
         key = hashlib.sha256(f"{ticker}|{interval}".encode()).hexdigest()[:16]
         return self.cache_dir / f"{ticker.upper()}_{interval}_{key}.parquet"
+
+    def _meta_path(self, ticker: str, interval: str) -> Path:
+        return self._cache_path(ticker, interval).with_suffix(".meta.json")
+
+    def _read_cached_security_name(self, ticker: str, interval: str) -> str | None:
+        meta_path = self._meta_path(ticker, interval)
+        if meta_path.exists():
+            try:
+                return json.loads(meta_path.read_text()).get("security_name")
+            except (json.JSONDecodeError, OSError):
+                return None
+        return None
+
+    def _write_cached_security_name(self, ticker: str, interval: str, security_name: str | None) -> None:
+        # Persisted separately from the parquet so the ticker-identity guard
+        # (engine.py's names_plausibly_match check) still has something to
+        # check against on a cache hit -- without this, a bad match caught on
+        # the first (uncached) fetch would silently stop being caught on
+        # every subsequent run against the same local cache.
+        if security_name:
+            self._meta_path(ticker, interval).write_text(json.dumps({"security_name": security_name}))
 
     def max_interval_lookback(self, interval: str, as_of: dt.datetime) -> dt.datetime | None:
         return self.inner.max_interval_lookback(interval, as_of)
@@ -53,7 +75,13 @@ class CachingProvider(MarketDataProvider):
                     )
                     for row in sub.itertuples()
                 ]
-                return BarSeries(ticker=ticker, interval=interval, bars=bars, source=f"{self.inner.__class__.__name__}(cached)")
+                return BarSeries(
+                    ticker=ticker,
+                    interval=interval,
+                    bars=bars,
+                    source=f"{self.inner.__class__.__name__}(cached)",
+                    security_name=self._read_cached_security_name(ticker, interval),
+                )
 
         series = self.inner.get_bars(ticker, start, end, interval)
         if series.bars:
@@ -78,4 +106,5 @@ class CachingProvider(MarketDataProvider):
             else:
                 combined = new_df.sort_values("ts")
             combined.to_parquet(path, index=False)
+            self._write_cached_security_name(ticker, interval, series.security_name)
         return series

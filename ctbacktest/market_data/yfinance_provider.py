@@ -53,6 +53,10 @@ class YFinanceProvider(MarketDataProvider):
         return as_of - dt.timedelta(days=days)
 
     def get_bars(self, ticker: str, start: dt.datetime, end: dt.datetime, interval: str) -> BarSeries:
+        # Yahoo's own symbol convention uses a hyphen for share classes where
+        # the PTR/roster data uses a dot (e.g. "BRK.B" -> "BRK-B") -- verified
+        # live: the dotted form 404s, the hyphenated form returns real data.
+        yahoo_ticker = ticker.replace(".", "-") if "." in ticker else ticker
         params = {
             "period1": int(start.timestamp()),
             "period2": int(end.timestamp()),
@@ -61,7 +65,7 @@ class YFinanceProvider(MarketDataProvider):
         }
         try:
             resp = self.session.get(
-                CHART_URL.format(ticker=ticker), params=params, headers=_HEADERS, timeout=self.timeout
+                CHART_URL.format(ticker=yahoo_ticker), params=params, headers=_HEADERS, timeout=self.timeout
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -77,6 +81,8 @@ class YFinanceProvider(MarketDataProvider):
             return BarSeries(ticker=ticker, interval=interval, bars=[], source="yfinance")
 
         node = result[0]
+        meta = node.get("meta") or {}
+        security_name = meta.get("longName") or meta.get("shortName")
         timestamps = node.get("timestamp") or []
         quote = (node.get("indicators", {}).get("quote") or [{}])[0]
         adjclose = (node.get("indicators", {}).get("adjclose") or [{}])
@@ -107,4 +113,4 @@ class YFinanceProvider(MarketDataProvider):
                     volume=v,
                 )
             )
-        return BarSeries(ticker=ticker, interval=interval, bars=bars, source="yfinance")
+        return BarSeries(ticker=ticker, interval=interval, bars=bars, source="yfinance", security_name=security_name)

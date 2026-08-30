@@ -28,6 +28,7 @@ class BarSeries:
     interval: str  # "1m" / "5m" / "1d"
     bars: list[Bar]
     source: str
+    security_name: str | None = None  # provider's own name for this symbol, when available -- see corporate_actions.names_plausibly_match
 
 
 class MarketDataProvider(ABC):

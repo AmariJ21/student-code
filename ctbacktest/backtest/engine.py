@@ -26,6 +26,7 @@ from ctbacktest.backtest.portfolio import PortfolioState
 from ctbacktest.backtest.same_bar import ExitTrigger, evaluate_bar
 from ctbacktest.config import BacktestConfig, DisclosureConfidence, PriceResolution
 from ctbacktest.market_data.base import BarSeries, MarketDataProvider
+from ctbacktest.market_data.corporate_actions import names_plausibly_match
 from ctbacktest.market_data.resolution import best_available_series
 from ctbacktest.utils.market_calendar import add_trading_days, earliest_tradable_timestamp, next_market_open_at_or_after
 
@@ -47,6 +48,7 @@ class TradeCandidate:
     owner_type: str
     amount_min: Optional[float] = None
     amount_max: Optional[float] = None
+    expected_asset_name: Optional[str] = None  # from the disclosure filing, used only as a ticker-reuse sanity check
 
 
 @dataclass
@@ -162,6 +164,14 @@ class BacktestEngine:
             series, resolution = self._fetch_series(candidate.ticker, entry_ts)
             if not series.bars:
                 trade.excluded_reason = "EXCLUDED_NO_PRICE_DATA"
+                results.append(trade)
+                continue
+            if not names_plausibly_match(candidate.expected_asset_name, series.security_name):
+                # Ticker-symbol reuse guard -- see corporate_actions.names_plausibly_match.
+                # A delisted name's old ticker can be reassigned to an unrelated
+                # company; trusting the price series here would silently trade
+                # on the wrong company's history rather than fail loudly.
+                trade.excluded_reason = "EXCLUDED_TICKER_IDENTITY_MISMATCH"
                 results.append(trade)
                 continue
 

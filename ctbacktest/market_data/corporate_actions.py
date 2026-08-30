@@ -47,6 +47,41 @@ def adjustment_ratio(bar: Bar) -> float:
     return bar.adj_close / bar.close
 
 
+_GENERIC_NAME_TOKENS = {
+    "INC", "INC.", "CORP", "CORPORATION", "CO", "CO.", "COMPANY", "LTD", "LTD.", "PLC",
+    "GROUP", "HOLDINGS", "HOLDING", "THE", "CLASS", "CL", "COMMON", "STOCK", "SHARES",
+    "TRUST", "FUND", "ETF", "A", "B", "C",
+}
+
+
+def names_plausibly_match(expected_name: str | None, provider_name: str | None) -> bool:
+    """Guards against ticker-symbol reuse: a delisted company's old ticker can
+    be re-assigned to an entirely unrelated new listing, and a provider's
+    history for that symbol can then silently return the WRONG company's
+    prices for old dates (confirmed live during development: Yahoo's "PARA"
+    history returned prices in the tens of thousands of dollars per share for
+    January 2024 -- Paramount Global traded around $12-14 then; Yahoo's own
+    `longName` for that data was a since-relisted micro-cap, not Paramount).
+
+    This is a coarse token-overlap heuristic, not a certified identity check
+    -- it exists to catch the obviously-wrong case, not to guarantee
+    correctness. When either name is missing, we can't check, so we don't
+    block (returns True) -- see FEASIBILITY.md for why ticker-change handling
+    is manual/best-effort, not fully automated."""
+    if not expected_name or not provider_name:
+        return True
+
+    def _tokens(name: str) -> set[str]:
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in name.upper())
+        return {tok for tok in cleaned.split() if tok not in _GENERIC_NAME_TOKENS and len(tok) > 1}
+
+    expected_tokens = _tokens(expected_name)
+    provider_tokens = _tokens(provider_name)
+    if not expected_tokens or not provider_tokens:
+        return True
+    return len(expected_tokens & provider_tokens) > 0
+
+
 def resolve_ticker(security_ticker_aliases: dict | None, ticker: str, as_of) -> str:
     """Look up a manually-maintained alias map for a ticker that changed
     symbols. Returns the input ticker unchanged if no alias applies -- this

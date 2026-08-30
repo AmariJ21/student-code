@@ -57,6 +57,7 @@ def transaction_date_benchmark(
             disclosure_confidence="BENCHMARK_LOOKAHEAD_TRANSACTION_DATE",
             transaction_date=c.transaction_date,
             owner_type=c.owner_type,
+            expected_asset_name=c.expected_asset_name,
         )
         for c in candidates
     ]
@@ -113,6 +114,7 @@ def randomized_entry_benchmark(
                     disclosure_confidence="BENCHMARK_RANDOMIZED_ENTRY",
                     transaction_date=c.transaction_date,
                     owner_type=c.owner_type,
+                    expected_asset_name=c.expected_asset_name,
                 )
             )
         engine = BacktestEngine(config, market_data)

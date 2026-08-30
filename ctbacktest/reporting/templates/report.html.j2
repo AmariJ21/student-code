@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Backtest Report #{{ run_id }}</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 0 2rem 4rem; background: #fafafa; color: #1a1a1a; }
+  h1 { margin-top: 2rem; }
+  h2 { border-bottom: 2px solid #ddd; padding-bottom: 0.3rem; margin-top: 2.5rem; }
+  .banner { background: #fff3cd; border: 1px solid #ffe08a; padding: 1rem 1.5rem; border-radius: 6px; margin: 1.5rem 0; }
+  .classification { display: inline-block; padding: 0.5rem 1.2rem; border-radius: 6px; font-weight: bold; font-size: 1.2rem; color: white; }
+  .metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .metric-card { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; }
+  .metric-card .label { font-size: 0.8rem; color: #666; text-transform: uppercase; }
+  .metric-card .value { font-size: 1.5rem; font-weight: 600; }
+  table.data-table { border-collapse: collapse; width: 100%; background: white; font-size: 0.9rem; }
+  table.data-table th, table.data-table td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: right; }
+  table.data-table th { background: #f0f0f0; text-align: center; }
+  table.data-table td:first-child, table.data-table th:first-child { text-align: left; }
+  pre.config { background: #272822; color: #f8f8f2; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+  .limitation-list li { margin-bottom: 0.6rem; }
+</style>
+</head>
+<body>
+
+<h1>Congressional Trading Disclosure Backtest -- Run #{{ run_id }}</h1>
+
+<div class="banner">
+  <strong>This is a research/paper-trading report, not investment advice.</strong>
+  It reflects the data limitations documented in FEASIBILITY.md (chamber
+  disclosure-timing asymmetry, daily-bar-only history for most of the sample,
+  survivorship bias for delisted securities, present-day sector/market-cap
+  metadata). See "Limitations" below before drawing conclusions.
+</div>
+
+<h2>1. Viability Classification</h2>
+{% set cls = summary.classification.label %}
+<span class="classification" style="background: {% if cls == 'STRONG HISTORICAL EDGE' %}#2e7d32{% elif cls == 'PROMISING' %}#558b2f{% elif cls == 'WEAK EDGE' %}#f9a825{% elif cls == 'NOT VIABLE' %}#c62828{% else %}#616161{% endif %};">
+  {{ cls }}
+</span>
+<ul>
+  {% for reason in summary.classification.reasons %}<li>{{ reason }}</li>{% endfor %}
+</ul>
+
+<h2>2. Strategy Configuration</h2>
+<pre class="config">{{ summary.configuration | tojson(indent=2) }}</pre>
+<p>Configuration hash: <code>{{ summary.configuration_hash }}</code> (two runs are the "same experiment" only if this matches exactly).</p>
+
+<h2>3. Candidate / Exclusion Summary</h2>
+<div class="metrics-grid">
+  {% for k, v in (summary.exclusion_summary or {}).items() %}
+    {% if k != 'excluded_by_reason' %}
+    <div class="metric-card"><div class="label">{{ k }}</div><div class="value">{{ v }}</div></div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% if summary.exclusion_summary and summary.exclusion_summary.excluded_by_reason %}
+<p>Excluded breakdown (never silently dropped): {{ summary.exclusion_summary.excluded_by_reason }}</p>
+{% endif %}
+
+<h2>4. Performance Metrics</h2>
+<div class="metrics-grid">
+  {% for group in [summary.return_metrics, summary.winloss_metrics, summary.risk_metrics] %}
+    {% for k, v in (group or {}).items() %}
+      {% if v is number %}
+      <div class="metric-card"><div class="label">{{ k }}</div><div class="value">{{ '%.4f' % v }}</div></div>
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+</div>
+{% if summary.risk_metrics and summary.risk_metrics.note %}<p><em>{{ summary.risk_metrics.note }}</em></p>{% endif %}
+
+<h2>5. Equity Curve</h2>
+{{ equity_fig | safe }}
+
+<h2>6. Drawdown</h2>
+{{ drawdown_fig | safe }}
+
+<h2>7. Distribution of Returns</h2>
+{{ return_dist_fig | safe }}
+
+<h2>8. Win/Loss Analysis</h2>
+<div class="metrics-grid">
+  {% for k, v in (summary.winloss_metrics or {}).items() %}
+    <div class="metric-card"><div class="label">{{ k }}</div><div class="value">{{ v }}</div></div>
+  {% endfor %}
+</div>
+
+<h2>9. Statistical Significance</h2>
+<div class="metrics-grid">
+  {% if summary.bootstrap_ci %}
+  <div class="metric-card"><div class="label">Bootstrap mean return CI (95%)</div>
+    <div class="value">{{ '%.4f' % summary.bootstrap_ci.mean }} [{{ '%.4f' % summary.bootstrap_ci.ci_low }}, {{ '%.4f' % summary.bootstrap_ci.ci_high }}]</div></div>
+  {% endif %}
+  {% if summary.ttest %}
+  <div class="metric-card"><div class="label">One-sample t-test vs 0</div>
+    <div class="value">t={{ '%.3f' % summary.ttest.t_stat }}, p={{ '%.4f' % summary.ttest.p_value }}</div></div>
+  {% endif %}
+  {% if summary.win_rate_ci %}
+  <div class="metric-card"><div class="label">Win rate (Wilson 95% CI)</div>
+    <div class="value">{{ '%.1f' % (summary.win_rate_ci.win_rate*100) }}% [{{ '%.1f' % (summary.win_rate_ci.ci_low*100) }}%, {{ '%.1f' % (summary.win_rate_ci.ci_high*100) }}%]</div></div>
+  {% endif %}
+</div>
+<p>A low p-value alone is not sufficient for a "viable" classification -- see classify.py and section 1 above.</p>
+
+<h2>10. Benchmark Comparison</h2>
+{% if summary.market_wide_check %}
+<div class="metrics-grid">
+  <div class="metric-card"><div class="label">SPY buy-hold mean return (same windows)</div><div class="value">{{ '%.4f' % (summary.market_wide_check.spy_mean_return or 0) }}</div></div>
+  <div class="metric-card"><div class="label">Excess over SPY</div><div class="value">{{ '%.4f' % (summary.market_wide_check.excess_over_spy or 0) }}</div></div>
+</div>
+<p>{{ summary.market_wide_check.interpretation }}</p>
+{% else %}
+<p><em>Benchmark comparison not run for this report.</em></p>
+{% endif %}
+
+<h2>11. Politician Breakdown</h2>
+{{ by_politician | safe }}
+{% if summary.politician_concentration %}<p>Concentration: {{ summary.politician_concentration }}</p>{% endif %}
+
+<h2>12. Chamber / Owner / Transaction-Size / Sector / Market-Cap / Disclosure-Delay Breakdowns</h2>
+<h3>Chamber</h3>{{ by_chamber | safe }}
+<h3>Owner</h3>{{ by_owner | safe }}
+<h3>Transaction Size</h3>{{ by_transaction_size | safe }}
+<h3>Sector <em>(present-day metadata approximation -- see Limitations)</em></h3>{{ by_sector | safe }}
+{% if summary.sector_concentration %}<p>Concentration: {{ summary.sector_concentration }}</p>{% endif %}
+<h3>Market Cap Bucket <em>(present-day approximation -- see Limitations)</em></h3>{{ by_market_cap | safe }}
+<h3>Disclosure Delay</h3>{{ by_disclosure_delay | safe }}
+
+<h2>13. Robustness Tests</h2>
+{% for key, label in [('slippage_sweep','Slippage sweep'), ('entry_delay_sweep','Entry-delay sweep'), ('take_profit_sweep','Take-profit sweep'), ('stop_loss_sweep','Stop-loss sweep'), ('max_hold_days_sweep','Max-hold-days sweep')] %}
+  <h3>{{ label }}</h3>
+  {% if robustness_tables and robustness_tables[key] %}{{ robustness_tables[key] | safe }}{% else %}<p><em>Not run for this report.</em></p>{% endif %}
+{% endfor %}
+
+<h2>14. Limitations</h2>
+<ul class="limitation-list">
+  <li>Disclosure timestamps are exact-to-the-minute for Senate filings but date-only (assumed 9:30am ET) for House filings -- see FEASIBILITY.md #3/#4. Trades carry a <code>disclosure_confidence</code> field so this is checkable per-trade, not averaged away.</li>
+  <li>Almost all trades in a multi-year backtest are priced on daily bars, not intraday, because free intraday history only covers a trailing ~7-60 day window (see FEASIBILITY.md #7). Same-bar TP/SL ambiguity is resolved by the configured <code>same_bar_mode</code> (conservative by default).</li>
+  <li>Survivorship bias: securities with no obtainable price history (typically delisted/merged names) are excluded and counted (see section 3 above), not silently dropped -- but this still means the tradable universe skews toward survivors.</li>
+  <li>Sector and market-cap breakdowns use present-day metadata, not metadata as of the trade date.</li>
+  <li>Options, bonds, mutual funds, and other non-equity/ETF instruments are excluded from simulation entirely (see exclusion summary) -- this system does not implement an options-pricing-aware backtester.</li>
+  <li>House PTR parsing is a best-effort PDF/text heuristic; scanned (pre-electronic-era) filings are excluded outright rather than OCR'd.</li>
+</ul>
+
+<h2>15. Final Conclusion</h2>
+<p>
+Based on the classification above ({{ cls }}) and the metrics, statistical
+tests, benchmarks, and robustness checks on this page: this report answers
+whether entering on public disclosure and exiting per the configured rule
+would have been profitable <em>under the stated assumptions and data
+limitations</em> -- not a claim that a bot literally out-traded Congress at
+minute resolution, which this data cannot prove either way (see FEASIBILITY.md).
+</p>
+
+</body>
+</html>
