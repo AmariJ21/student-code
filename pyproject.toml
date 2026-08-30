@@ -1,0 +1,11 @@
+[project]
+name = "ctbacktest"
+version = "0.1.0"
+description = "Research-grade backtester for the congressional-disclosure trading hypothesis. Paper research only; no live trading."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["ctbacktest*"]
