@@ -268,4 +268,119 @@ before calling anything better than "weak edge" — a good number on the full
 sample alone is explicitly insufficient (see `backtest/classify.py`).
 
 ---
+
+## Addendum: restructuring toward the researched motif
+
+After the baseline system above was built and validated, further research
+(academic literature plus current leaderboards and named individuals like
+Nancy Pelosi) showed that the mechanical "any disclosed BUY, flip at a fixed
+target" baseline is very unlikely to match how the standout individual
+performers actually made money. This addendum documents what changed, why,
+and what it verified live, in the same spirit as the rest of this document:
+nothing here is asserted without having been checked against real data.
+
+### What the research showed (see the conversation's research summary for full citations)
+
+- Post-STOCK-Act academic studies (Belmont/Sacerdote/Sehgal/Van Hoek, NBER 2020;
+  Eggers/Hainmueller) find senators' stock **purchases** do not beat matched
+  benchmarks on average — the broad "follow any member" signal is weak to
+  absent once you're not using their actual (unknowable-to-a-copier)
+  transaction-date entry.
+- Performance is heavily concentrated in **specific individuals** (in 2025,
+  only 100 of 311 disclosed portfolios, ~32%, beat the S&P 500) and in
+  **leadership status** (a documented ~47-point annual premium after a
+  member ascends to a leadership role).
+- The standout individual cases (Pelosi being the most visible) are driven
+  mostly by **leveraged long-dated call options** on concentrated positions,
+  held for years through a market cycle and exercised into stock — not by a
+  quick mechanical stock flip. Verified live: a real Pelosi PTR describes
+  buying LEAPS calls on GOOGL/AMZN/NVDA/TEM/VST, and a real Senator's PTR
+  shows the same pattern via short-dated calls/puts on individual names and
+  ETFs (ARKK, XBI, CLF, GILD, ADBE, ...).
+
+None of this proves the strategy works — it's a prior about *where any edge
+plausibly lives*, which is what the restructuring below is built to actually
+test rather than assume.
+
+### What changed, and what was verified live while building it
+
+1. **Options are now simulated**, not excluded. `backtest/options.py` prices
+   them with Black-Scholes-Merton (validated against textbook values), using
+   the underlying's own trailing realized volatility as an IV proxy (no free
+   historical IV data exists at these dates/strikes -- a documented
+   approximation, not a fabrication) and coarse constants for the risk-free
+   rate and dividend yield. **Parsing option details required a real rewrite**,
+   not just a new regex: a live-fetched Pelosi PTR showed strike/expiration/
+   call-or-put living in a free-text comment line the original parser didn't
+   even capture, and showed far more severe column-interleaving than the
+   original House parser was built for (the ticker itself, not just an
+   asset-type tag, can land after the transaction-type/date/amount block).
+   The parser was rewritten around proximity-paired anchors instead of one
+   sequential regex. Also found live: the same ticker can carry two different
+   asset types in one filing (NVDA as both a stock sale and an option
+   purchase in the same Pelosi PTR), and an "Exercised N options..." event
+   must resolve to a stock position, not a fresh option purchase at an
+   already-expired strike.
+2. **A `long_hold` strategy mode** exists alongside the original `short_term_target`
+   mode: no fixed take-profit or hold-day ceiling, just a trailing stop from
+   the position's post-entry peak, and — for options — realizing intrinsic
+   value at an ITM expiration and rolling it into an equivalent-dollar stock
+   position that keeps riding the same trailing-stop rule (approximating
+   "exercise and hold for years" without literally modeling the exercise
+   cash outlay, which is a stated simplification). Verified live: a
+   simulated NVDA $80 LEAPS call replicating the real Pelosi Jan-2025 trade
+   correctly rode into the real DeepSeek-shock crash for a realistic
+   stop-out, and a hypothetical NVDA $40 call from Jan 2024 correctly
+   exercised at its March 2024 expiration, rolled into stock, and rode
+   NVDA's real 2024 AI rally to a trailing-stop exit during the real August
+   2024 pullback.
+3. **A causal, point-in-time politician leaderboard** (`backtest/leaderboard.py`)
+   is the methodologically honest version of "follow top performers": a
+   politician only becomes eligible to be followed once they have enough
+   *already-closed* trades in the backtest itself, ranked by trailing
+   realized return as of the moment a new candidate is being considered —
+   never by performance that hasn't happened yet from that point's
+   perspective. A separate, clearly-labeled "named case study" mode exists
+   for restricting a run to specific known individuals (e.g. just Pelosi)
+   for illustration — this is hindsight selection, not a backtest, and
+   `backtest/classify.py` structurally refuses to return anything but
+   `CASE STUDY (NOT A GENERAL-EDGE CLAIM)` for such a run regardless of how
+   good its numbers look, so this can't be misreported by accident.
+4. **Leadership and (present-day) committee data** were added to the
+   `Politician` schema, sourced from unitedstates/congress-legislators'
+   real `leadership_roles` field (dated, so it's usable causally) and
+   `committee-membership-current.yaml` (a present-day snapshot only — no
+   free historical committee-roster archive exists, so this is a weaker,
+   present-day-only signal, analogous to the sector/market-cap caveat above).
+
+### A real, non-obvious finding from live-testing this end-to-end
+
+Running the restructured system against real 2024-2025 Senate/House data
+(1,574 loaded BUY candidates) surfaced something worth stating plainly:
+**long-hold positions tie up portfolio capacity for a long time** (average
+holding period in that run was ~548 days), so with the default
+`max_positions: 10`, **92.5% of candidates were excluded purely on
+portfolio-capacity grounds**, not on data or price problems. Only 16 trades
+actually got simulated in that run, and while they looked spectacular
+(total return well over 100%, profit factor > 3), 16 is far below the
+classifier's minimum sample size, so the correct, honest output was
+`INSUFFICIENT DATA` — not a viability claim. This is exactly the intended
+behavior (a good-looking number on a tiny sample must never pass as
+evidence), but it also means: a real long-hold-mode study needs either a
+much longer ingestion window (years, to accumulate enough trades) or an
+explicitly larger `max_positions`/smaller `position_size_pct`, chosen and
+justified up front — not tuned after seeing results, which would be the
+exact test-set-leakage the spec prohibits.
+
+### Necessary modification to the classification bar
+
+Because the mechanical baseline and the researched motif are genuinely
+different strategies (different holding logic, different instrument mix,
+different candidate-selection logic), they are reported as separate,
+separately-classified runs — a report never blends "all Congress, quick
+flip" trades with "leaderboard-gated, long-hold, options-inclusive" trades
+into one headline number. Compare their `report.html` outputs side by side
+rather than expecting one run to answer both questions.
+
+---
 See `IMPLEMENTATION_PLAN.md` for architecture, schema, and methodology.

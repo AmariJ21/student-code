@@ -62,7 +62,45 @@ python main.py backtest \
 This writes `results/backtest_<run_id>/` containing `summary.json`,
 `trades.csv`, `equity_curve.csv`, `politician_analysis.csv`,
 `sector_analysis.csv`, `disclosure_delay.csv`, and a self-contained
-`report.html` (open it directly in a browser). `--with-robustness` reruns the
+`report.html` (open it directly in a browser).
+
+### The researched-motif options (see FEASIBILITY.md's "Restructuring" addendum)
+
+The baseline above tests the mechanical "any disclosed BUY, flip at a fixed
+target" hypothesis. Research showed the standout individual performers'
+returns are driven mostly by leveraged long-dated options held for years, and
+that performance is concentrated in specific people/leadership, not spread
+across Congress. Three flags test that shape instead -- as a **separate**
+run, never blended into the baseline's numbers:
+
+```bash
+python main.py backtest \
+    --instrument-scope include_options --holding-mode long_hold \
+    --politician-selection rolling_leaderboard --leaderboard-top-k 10 \
+    --start-date 2020-01-01 --end-date 2025-12-31 --max-positions 40
+```
+
+- `--instrument-scope include_options` simulates parsed option trades via
+  Black-Scholes (`backtest/options.py`) instead of skipping them.
+- `--holding-mode long_hold` drops the fixed take-profit/max-hold-days rule
+  for a trailing stop, and rolls an exercised ITM option into an
+  equivalent-dollar stock position rather than closing it outright.
+- `--politician-selection rolling_leaderboard` only follows politicians who
+  already have a track record *as of that point in the backtest* (never
+  based on performance that hasn't happened yet from that point's
+  perspective) -- this is the honest version of "follow top performers."
+- **Long-hold positions tie up portfolio capacity for a long time** (often
+  over a year each), so `--max-positions` needs to be set deliberately
+  higher than the short-term default, and the ingestion window needs to
+  span years, or almost every candidate will be excluded on capacity alone
+  before ever reaching a price check -- see the FEASIBILITY.md addendum for
+  a real example where this excluded 92.5% of candidates.
+- For an illustrative (never general-edge) look at one specific person:
+  `--politician-selection named_case_study --case-study-name Pelosi`. Any
+  such run is always reported as `CASE STUDY (NOT A GENERAL-EDGE CLAIM)`,
+  enforced in `backtest/classify.py` regardless of how good its numbers look.
+
+`--with-robustness` reruns the
 engine across the slippage/delay/TP/SL/hold-day grids from the spec, which
 is slower (many re-fetches) but is what the viability classification (also
 in the report) actually depends on -- a single base-case run alone will

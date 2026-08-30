@@ -134,6 +134,8 @@ def build_report(run_id: int, bundle: dict, classification: dict, output_root: s
         by_transaction_size=_table_html(bundle.get("by_transaction_size")),
         by_market_cap=_table_html(bundle.get("by_market_cap")),
         by_disclosure_delay=_table_html(bundle.get("by_disclosure_delay")),
+        by_instrument_kind=_table_html(bundle.get("by_instrument_kind")),
+        is_case_study=classification.get("label") == "CASE STUDY (NOT A GENERAL-EDGE CLAIM)",
         robustness_tables=robustness_tables,
     )
     (output_dir / "report.html").write_text(html)

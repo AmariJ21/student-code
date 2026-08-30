@@ -15,21 +15,30 @@ from ctbacktest.backtest import benchmarks, metrics as metrics_mod, statistics a
 from ctbacktest.backtest.classify import classify_viability
 from ctbacktest.backtest.engine import BacktestEngine, TradeCandidate
 from ctbacktest.analysis import attribution, breakdowns
-from ctbacktest.config import BacktestConfig, TransactionType, AssetType
+from ctbacktest.config import AssetType, BacktestConfig, InstrumentScope, PoliticianSelectionMode, TransactionType
 from ctbacktest.db.models import BacktestRun, BacktestTrade, Disclosure, PortfolioSnapshot, Politician, Security, Transaction
 
 logger = logging.getLogger(__name__)
 
-# Options backtesting requires a materially different engine (strike/expiry-
-# aware); out of scope for this project (spec section 8: "do not blindly
-# treat options as ordinary stock purchases"). Only equity-like instruments
-# are simulated -- everything else is excluded and counted, not dropped.
-SIMULATABLE_ASSET_TYPES = {AssetType.COMMON_STOCK.value, AssetType.ETF.value}
+# Plain equities/ETFs are always in scope. OPTION is only added when the
+# strategy config asks for it (InstrumentScope.INCLUDE_OPTIONS) -- see
+# backtest/options.py and engine.py for how those are actually simulated.
+# Everything else (bonds, mutual funds, "OTHER") is out of scope regardless;
+# excluded and counted, never silently dropped.
+_BASE_SIMULATABLE_ASSET_TYPES = {AssetType.COMMON_STOCK.value, AssetType.ETF.value}
 
 
 def load_candidates_from_db(
-    session, start_date: dt.date | None = None, end_date: dt.date | None = None, buys_only: bool = True
+    session,
+    start_date: dt.date | None = None,
+    end_date: dt.date | None = None,
+    buys_only: bool = True,
+    instrument_scope: InstrumentScope = InstrumentScope.STOCK_ETF_ONLY,
 ) -> list[TradeCandidate]:
+    simulatable_types = set(_BASE_SIMULATABLE_ASSET_TYPES)
+    if instrument_scope == InstrumentScope.INCLUDE_OPTIONS:
+        simulatable_types.add(AssetType.OPTION.value)
+
     query = (
         session.query(Transaction, Disclosure, Security)
         .join(Disclosure, Transaction.disclosure_id == Disclosure.disclosure_id)
@@ -45,12 +54,17 @@ def load_candidates_from_db(
     candidates = []
     skipped_asset_type = 0
     skipped_no_ticker = 0
+    skipped_incomplete_option = 0
     for txn, disclosure, security in query.all():
         if security is None or not security.ticker:
             skipped_no_ticker += 1
             continue
-        if txn.asset_type not in SIMULATABLE_ASSET_TYPES:
+        if txn.asset_type not in simulatable_types:
             skipped_asset_type += 1
+            continue
+        is_option = txn.asset_type == AssetType.OPTION.value
+        if is_option and (not txn.option_type or not txn.strike_price or not txn.expiration_date):
+            skipped_incomplete_option += 1
             continue
         candidates.append(
             TradeCandidate(
@@ -66,13 +80,19 @@ def load_candidates_from_db(
                 amount_min=txn.amount_min,
                 amount_max=txn.amount_max,
                 expected_asset_name=security.asset_name,
+                instrument_kind="OPTION" if is_option else "STOCK",
+                option_type=txn.option_type if is_option else None,
+                strike_price=txn.strike_price if is_option else None,
+                expiration_date=txn.expiration_date if is_option else None,
             )
         )
     logger.info(
-        "Loaded %d simulatable BUY candidates (skipped %d non-equity/option/bond asset types, %d with no resolvable ticker).",
+        "Loaded %d simulatable BUY candidates (skipped %d out-of-scope asset types, %d with no resolvable ticker, "
+        "%d option rows with incomplete strike/expiration parsing).",
         len(candidates),
         skipped_asset_type,
         skipped_no_ticker,
+        skipped_incomplete_option,
     )
     return candidates
 
@@ -137,7 +157,7 @@ def run_full_backtest(
     run_benchmarks: bool = True,
     run_bootstrap: bool = True,
 ) -> dict:
-    candidates = load_candidates_from_db(session, start_date, end_date)
+    candidates = load_candidates_from_db(session, start_date, end_date, instrument_scope=config.strategy.instrument_scope)
     engine = BacktestEngine(config, market_data)
     trades = engine.run(candidates)
     df = metrics_mod.trades_to_dataframe(trades)
@@ -175,6 +195,7 @@ def run_full_backtest(
         bundle["by_sector"] = breakdowns.by_sector(df, securities)
         bundle["by_market_cap"] = breakdowns.by_market_cap_bucket(df, securities)
         bundle["by_disclosure_delay"] = breakdowns.by_disclosure_delay(df)
+        bundle["by_instrument_kind"] = breakdowns.by_instrument_kind(df)
 
         if not bundle["by_politician"].empty:
             bundle["politician_concentration"] = attribution.concentration_by_group(bundle["by_politician"])
@@ -196,6 +217,7 @@ def classify_from_bundle(bundle: dict, oos_bundle: dict | None = None, robustnes
     missing OOS results as INSUFFICIENT_DATA, so this is only a convenience
     wrapper that decides which bundle's numbers to feed in."""
     source = oos_bundle or bundle
+    is_case_study = source["config"].strategy.politician_selection_mode == PoliticianSelectionMode.NAMED_CASE_STUDY
     sim_df = source["trades_df"]
     n = int(sim_df["excluded_reason"].isna().sum()) if not sim_df.empty else 0
     mean_return = source["return_metrics"].get("average_trade_return")
@@ -227,4 +249,16 @@ def classify_from_bundle(bundle: dict, oos_bundle: dict | None = None, robustnes
         excess_return_over_spy=excess_spy,
         net_return_survives_high_slippage=survives_slippage,
         robust_across_param_grid_fraction=robust_fraction,
+        is_case_study=is_case_study,
     )
+
+
+def resolve_politician_ids_by_name(session, name_query: str) -> list[int]:
+    """Case-insensitive substring match against full_name, for setting up
+    StrategyConfig.named_case_study_politician_ids from the CLI (e.g.
+    --case-study-name Pelosi). Returns every match -- a name can resolve to
+    more than one Politician row (e.g. one per chamber served, or an
+    unmatched roster entry created by ingestion -- see
+    ingestion/pipeline.py's _get_or_create_politician)."""
+    rows = session.query(Politician).filter(Politician.full_name.ilike(f"%{name_query}%")).all()
+    return [p.politician_id for p in rows]

@@ -19,6 +19,7 @@ class Viability(str, Enum):
     PROMISING = "PROMISING"
     STRONG_HISTORICAL_EDGE = "STRONG HISTORICAL EDGE"
     INSUFFICIENT_DATA = "INSUFFICIENT DATA"
+    CASE_STUDY_NOT_GENERALIZABLE = "CASE STUDY (NOT A GENERAL-EDGE CLAIM)"
 
 
 MIN_SAMPLE_SIZE = 30
@@ -34,7 +35,26 @@ def classify_viability(
     excess_return_over_spy: float | None,
     net_return_survives_high_slippage: bool | None,
     robust_across_param_grid_fraction: float | None,
+    is_case_study: bool = False,
 ) -> dict:
+    if is_case_study:
+        # Named-individual case-study runs (e.g. "just Pelosi") select
+        # politicians BECAUSE we already know how they performed -- that's
+        # hindsight, not a backtest, no matter how good the numbers look.
+        # This is enforced here, not left to report-copy discipline: no
+        # metric combination can escalate a case study past this label.
+        return {
+            "label": Viability.CASE_STUDY_NOT_GENERALIZABLE.value,
+            "reasons": [
+                "This run restricts candidates to specific named politicians chosen because their performance is "
+                "already known -- that is hindsight/survivorship selection, not an out-of-sample test. The metrics "
+                "in this report describe what would have happened following that specific, already-known-successful "
+                "person; they are not evidence that following congressional disclosures in general has an edge. "
+                "See PoliticianSelectionMode.ROLLING_LEADERBOARD for the methodologically honest version of "
+                "'follow top performers.'"
+            ],
+        }
+
     reasons: list[str] = []
 
     if sample_size < MIN_SAMPLE_SIZE:

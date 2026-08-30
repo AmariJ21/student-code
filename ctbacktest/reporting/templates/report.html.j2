@@ -33,6 +33,17 @@
   metadata). See "Limitations" below before drawing conclusions.
 </div>
 
+{% if is_case_study %}
+<div class="banner" style="background:#f8d7da;border-color:#f1aeb5;">
+  <strong>&#9888; Case-study run -- not a general-edge result.</strong>
+  This run was restricted to specific named politicians chosen because their
+  performance is already publicly known. Any positive numbers below reflect
+  hindsight selection, not a test of whether following congressional
+  disclosures in general has an edge. See the classification reasons in
+  section 1 for why this can never be reported as "viable."
+</div>
+{% endif %}
+
 <h2>1. Viability Classification</h2>
 {% set cls = summary.classification.label %}
 <span class="classification" style="background: {% if cls == 'STRONG HISTORICAL EDGE' %}#2e7d32{% elif cls == 'PROMISING' %}#558b2f{% elif cls == 'WEAK EDGE' %}#f9a825{% elif cls == 'NOT VIABLE' %}#c62828{% else %}#616161{% endif %};">
@@ -126,6 +137,7 @@
 {% if summary.sector_concentration %}<p>Concentration: {{ summary.sector_concentration }}</p>{% endif %}
 <h3>Market Cap Bucket <em>(present-day approximation -- see Limitations)</em></h3>{{ by_market_cap | safe }}
 <h3>Disclosure Delay</h3>{{ by_disclosure_delay | safe }}
+<h3>Instrument Kind (Stock vs Option) <em>-- does the edge live in the option leg?</em></h3>{{ by_instrument_kind | safe }}
 
 <h2>13. Robustness Tests</h2>
 {% for key, label in [('slippage_sweep','Slippage sweep'), ('entry_delay_sweep','Entry-delay sweep'), ('take_profit_sweep','Take-profit sweep'), ('stop_loss_sweep','Stop-loss sweep'), ('max_hold_days_sweep','Max-hold-days sweep')] %}

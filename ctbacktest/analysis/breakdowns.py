@@ -110,3 +110,10 @@ def by_disclosure_delay(df: pd.DataFrame) -> pd.DataFrame:
     merged = df.copy()
     merged["delay_bucket"] = merged["disclosure_delay_days"].apply(lambda v: _bucket(v, DISCLOSURE_DELAY_BUCKETS))
     return _group_summary(merged, "delay_bucket")
+
+
+def by_instrument_kind(df: pd.DataFrame) -> pd.DataFrame:
+    """STOCK vs OPTION -- the researched motif's central question: does the
+    edge (if any) actually live in the option leg, as the individual
+    standout performers suggest, or does it show up in plain stock too?"""
+    return _group_summary(df, "instrument_kind")

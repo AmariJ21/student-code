@@ -89,9 +89,9 @@ def update(days):
 
 
 @cli.command()
-@click.option("--take-profit", type=float, default=0.10)
-@click.option("--stop-loss", type=float, default=None)
-@click.option("--max-hold-days", type=int, default=30)
+@click.option("--take-profit", type=float, default=0.10, help="Ignored in --holding-mode long_hold")
+@click.option("--stop-loss", type=float, default=None, help="Ignored in --holding-mode long_hold")
+@click.option("--max-hold-days", type=int, default=30, help="Ignored in --holding-mode long_hold")
 @click.option("--entry-delay-minutes", default=0, help="int minutes, or 'next_open'")
 @click.option("--start-date", type=str, default=None)
 @click.option("--end-date", type=str, default=None)
@@ -101,19 +101,64 @@ def update(days):
 @click.option("--max-positions", type=int, default=10)
 @click.option("--with-benchmarks/--no-benchmarks", default=True)
 @click.option("--with-robustness/--no-robustness", default=False, help="Run the full robustness grid (slower: re-runs the engine many times).")
+@click.option(
+    "--holding-mode", type=click.Choice(["short_term_target", "long_hold"]), default="short_term_target",
+    help="long_hold = the researched motif: trailing stop, no fixed target/hold-day ceiling, exercise-and-hold at option expiration.",
+)
+@click.option("--long-hold-trailing-stop-pct", type=float, default=0.30)
+@click.option(
+    "--instrument-scope", type=click.Choice(["stock_etf_only", "include_options"]), default="stock_etf_only",
+    help="include_options simulates parsed option trades via Black-Scholes (see backtest/options.py) -- this is where most of the researched motif's returns actually come from.",
+)
+@click.option(
+    "--politician-selection", type=click.Choice(["all", "rolling_leaderboard", "named_case_study"]), default="all",
+    help="rolling_leaderboard = causal top-K by trailing performance (the honest 'follow top performers' test). "
+    "named_case_study = restrict to --case-study-name people; ALWAYS reported as a non-generalizable case study, never a general-edge claim.",
+)
+@click.option("--leaderboard-top-k", type=int, default=10)
+@click.option("--leaderboard-lookback-days", type=int, default=365)
+@click.option("--leaderboard-min-track-record", type=int, default=3)
+@click.option("--case-study-name", "case_study_names", multiple=True, help="Repeatable, e.g. --case-study-name Pelosi --case-study-name Tuberville")
 def backtest(
     take_profit, stop_loss, max_hold_days, entry_delay_minutes, start_date, end_date, split_label,
     starting_capital, position_size_pct, max_positions, with_benchmarks, with_robustness,
+    holding_mode, long_hold_trailing_stop_pct, instrument_scope, politician_selection,
+    leaderboard_top_k, leaderboard_lookback_days, leaderboard_min_track_record, case_study_names,
 ):
     """Run one backtest, persist it, and write results/backtest_<run_id>/."""
-    from ctbacktest.config import BacktestConfig, ExecutionConfig, PortfolioConfig, StrategyConfig
-    from ctbacktest.orchestration import classify_from_bundle, persist_run, run_full_backtest
+    from ctbacktest.config import (
+        BacktestConfig, ExecutionConfig, HoldingMode, InstrumentScope, PoliticianSelectionMode,
+        PortfolioConfig, StrategyConfig,
+    )
+    from ctbacktest.orchestration import classify_from_bundle, persist_run, resolve_politician_ids_by_name, run_full_backtest
     from ctbacktest.backtest.robustness import full_robustness_report
     from ctbacktest.reporting.report_builder import build_report
 
     delay = entry_delay_minutes if entry_delay_minutes == "next_open" else int(entry_delay_minutes)
+
+    case_study_ids: list[int] = []
+    if politician_selection == "named_case_study":
+        if not case_study_names:
+            raise click.UsageError("--politician-selection named_case_study requires at least one --case-study-name")
+        with _session_scope() as lookup_session:
+            for name in case_study_names:
+                ids = resolve_politician_ids_by_name(lookup_session, name)
+                if not ids:
+                    click.echo(f"Warning: no politician found matching {name!r}")
+                case_study_ids.extend(ids)
+        if not case_study_ids:
+            raise click.UsageError("None of the --case-study-name values matched a politician in the database.")
+
     config = BacktestConfig(
-        strategy=StrategyConfig(take_profit=take_profit, stop_loss=stop_loss, max_hold_days=max_hold_days, entry_delay_minutes=delay),
+        strategy=StrategyConfig(
+            take_profit=take_profit, stop_loss=stop_loss, max_hold_days=max_hold_days, entry_delay_minutes=delay,
+            holding_mode=HoldingMode(holding_mode), long_hold_trailing_stop_pct=long_hold_trailing_stop_pct,
+            instrument_scope=InstrumentScope(instrument_scope),
+            politician_selection_mode=PoliticianSelectionMode(politician_selection),
+            leaderboard_top_k=leaderboard_top_k, leaderboard_lookback_days=leaderboard_lookback_days,
+            leaderboard_min_track_record_trades=leaderboard_min_track_record,
+            named_case_study_politician_ids=case_study_ids,
+        ),
         execution=ExecutionConfig(),
         portfolio=PortfolioConfig(starting_capital=starting_capital, position_size_pct=position_size_pct, max_positions=max_positions),
         start_date=start_date,
